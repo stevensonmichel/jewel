@@ -40,8 +40,9 @@ Repository Specification Format:
     --always-clone-repos accepts "[org1|org2|...]/repo-name" format:
     - Tries each org in order until finding one with the target branch
     - All variants share the same repo name (and thus target directory)
-    - If the exact branch is missing and the name starts with stable-x.y-
-      (e.g. stable-x.y-feature), try stable-x.y next; otherwise fall back to devel
+    - If the exact branch is missing, try progressively shorter prefixes of the
+      branch name that exist in the dependency repo (longest path-prefix first);
+      otherwise fall back to devel
 
     Example: ansible/django-ansible-base
     - Tries ansible/django-ansible-base first
@@ -55,7 +56,7 @@ import re
 import shutil
 import subprocess
 import sys
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import requests  # type: ignore
 
@@ -347,12 +348,32 @@ def process_explicit_requirements(pr_body: str, token: Optional[str]) -> list:
     return repos_to_clone
 
 
-def stable_prefix_branch(target_branch: str) -> Optional[str]:
-    """If target_branch starts with stable-x.y-..., return that stable-x.y prefix."""
-    stable_match = re.match(r'^(stable-\d+\.\d+)-.+$', target_branch)
-    if not stable_match:
+def prefix_branch_candidates(target_branch: str) -> List[str]:
+    """
+    Proper prefixes of target_branch formed by stripping trailing '-'/' segments.
+
+    Longest first. Equivalent to picking an existing repo branch ``b`` where
+    ``target_branch.startswith(b)`` at a path boundary, without enumerating
+    every remote branch.
+    """
+    candidates = []
+    for i in range(len(target_branch) - 1, 0, -1):
+        if target_branch[i] in '-/':
+            candidates.append(target_branch[:i])
+    return candidates
+
+
+def longest_matching_prefix_branch(target_branch: str, branches: Iterable[str]) -> Optional[str]:
+    """
+    Longest branch name that is a path-prefix of target_branch.
+
+    Requires a '-' or '/' boundary so e.g. ``main`` does not match
+    ``maintenance-foo``.
+    """
+    matches = [b for b in branches if b and b != target_branch and (target_branch.startswith(b + '-') or target_branch.startswith(b + '/'))]
+    if not matches:
         return None
-    return stable_match.group(1)
+    return max(matches, key=len)
 
 
 def _find_repo_with_branch(repo_variants: list, branch: str, token: Optional[str]) -> Optional[str]:
@@ -383,13 +404,13 @@ def process_always_clone_repos(always_clone_repos: list, target_branch: str, tok
         matching_repo = _find_repo_with_branch(repo_variants, target_branch, token)
 
         if not matching_repo:
-            # Prefer stable-x.y when the base starts with stable-x.y-...
-            stable_branch = stable_prefix_branch(target_branch)
-            if stable_branch:
-                print(f"  ⚠️  Branch '{target_branch}' not found in any variant, trying '{stable_branch}'")
-                matching_repo = _find_repo_with_branch(repo_variants, stable_branch, token)
+            # Try existing branches that are path-prefixes of the target
+            for prefix_branch in prefix_branch_candidates(target_branch):
+                print(f"  ⚠️  Branch '{target_branch}' not found in any variant, trying '{prefix_branch}'")
+                matching_repo = _find_repo_with_branch(repo_variants, prefix_branch, token)
                 if matching_repo:
-                    selected_branch = stable_branch
+                    selected_branch = prefix_branch
+                    break
 
         if not matching_repo:
             # Final fallback: devel

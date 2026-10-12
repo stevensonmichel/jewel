@@ -400,14 +400,14 @@ class TestMainScenarios:
 
     @patch("get_pr_checkout.execute_git_clone")
     @patch("get_pr_checkout.branch_exists")
-    def test_stable_prefixed_base_falls_back_to_stable_prefix(self, mock_branch_exists, mock_clone, monkeypatch):
-        """Bases starting with stable-x.y- fall back to stable-x.y before devel"""
+    def test_prefixed_base_falls_back_to_longest_existing_prefix(self, mock_branch_exists, mock_clone, monkeypatch):
+        """Missing exact base falls back to the longest existing path-prefix branch"""
         monkeypatch.setenv("PR_BODY", "No requirements")
         monkeypatch.setenv("GH_TOKEN", "test_token")
-        monkeypatch.setenv("GITHUB_BASE_REF", "stable-1.2-feature")
+        monkeypatch.setenv("GITHUB_BASE_REF", "release-1.2-feature")
         _set_cli_args("ansible/ansible.platform")
 
-        mock_branch_exists.side_effect = lambda repo, branch, token: branch == "stable-1.2"
+        mock_branch_exists.side_effect = lambda repo, branch, token: branch == "release-1.2"
         mock_clone.return_value = True
 
         with pytest.raises(SystemExit) as exc_info:
@@ -415,15 +415,15 @@ class TestMainScenarios:
 
         assert exc_info.value.code == 0
         mock_clone.assert_called_once()
-        assert mock_clone.call_args[0][1] == "stable-1.2"
+        assert mock_clone.call_args[0][1] == "release-1.2"
 
     @patch("get_pr_checkout.execute_git_clone")
     @patch("get_pr_checkout.branch_exists")
-    def test_stable_prefixed_base_falls_back_to_devel_when_prefix_missing(self, mock_branch_exists, mock_clone, monkeypatch):
-        """If neither exact nor stable-x.y exists, fall back to devel"""
+    def test_prefixed_base_falls_back_to_devel_when_no_prefix_exists(self, mock_branch_exists, mock_clone, monkeypatch):
+        """If neither exact nor any path-prefix branch exists, fall back to devel"""
         monkeypatch.setenv("PR_BODY", "No requirements")
         monkeypatch.setenv("GH_TOKEN", "test_token")
-        monkeypatch.setenv("GITHUB_BASE_REF", "stable-1.2-feature")
+        monkeypatch.setenv("GITHUB_BASE_REF", "release-1.2-feature")
         _set_cli_args("ansible/ansible.platform")
 
         mock_branch_exists.return_value = False
@@ -436,11 +436,26 @@ class TestMainScenarios:
         mock_clone.assert_called_once()
         assert mock_clone.call_args[0][1] == "devel"
 
-    def test_stable_prefix_branch_from_feature_base(self):
-        assert get_pr_checkout.stable_prefix_branch("stable-1.2-feature") == "stable-1.2"
+    @pytest.mark.parametrize(
+        "target, expected",
+        [
+            ("release-1.2-feature", ["release-1.2", "release"]),
+            ("feature/my-work", ["feature/my", "feature"]),
+            ("devel", []),
+            ("release-1.2", ["release"]),
+        ],
+    )
+    def test_prefix_branch_candidates(self, target, expected):
+        assert get_pr_checkout.prefix_branch_candidates(target) == expected
 
-    def test_stable_prefix_branch_exact_stable(self):
-        assert get_pr_checkout.stable_prefix_branch("stable-1.2") is None
+    def test_longest_matching_prefix_branch_prefers_longest(self):
+        branches = ["release", "release-1.2", "devel", "main"]
+        assert get_pr_checkout.longest_matching_prefix_branch("release-1.2-feature", branches) == "release-1.2"
+
+    def test_longest_matching_prefix_branch_requires_separator(self):
+        # "main" must not match "maintenance-foo"
+        assert get_pr_checkout.longest_matching_prefix_branch("maintenance-foo", ["main", "devel"]) is None
+        assert get_pr_checkout.longest_matching_prefix_branch("maintenance-foo", ["maintenance", "main"]) == "maintenance"
 
     @patch("get_pr_checkout.execute_git_clone")
     @patch("get_pr_checkout.branch_exists")
