@@ -40,7 +40,8 @@ Repository Specification Format:
     --always-clone-repos accepts "[org1|org2|...]/repo-name" format:
     - Tries each org in order until finding one with the target branch
     - All variants share the same repo name (and thus target directory)
-    - For devel: falls back to default branch if no match found
+    - If the exact branch is missing and the name starts with stable-x.y-
+      (e.g. stable-x.y-feature), try stable-x.y next; otherwise fall back to devel
 
     Example: ansible/django-ansible-base
     - Tries ansible/django-ansible-base first
@@ -346,6 +347,25 @@ def process_explicit_requirements(pr_body: str, token: Optional[str]) -> list:
     return repos_to_clone
 
 
+def stable_prefix_branch(target_branch: str) -> Optional[str]:
+    """If target_branch starts with stable-x.y-..., return that stable-x.y prefix."""
+    stable_match = re.match(r'^(stable-\d+\.\d+)-.+$', target_branch)
+    if not stable_match:
+        return None
+    return stable_match.group(1)
+
+
+def _find_repo_with_branch(repo_variants: list, branch: str, token: Optional[str]) -> Optional[str]:
+    """Return the first repo variant that has the given branch, or None."""
+    for repo_variant in repo_variants:
+        print(f"  Checking for branch '{branch}' in '{repo_variant}'...")
+        if branch_exists(repo_variant, branch, token):
+            print(f"  ✅ Found matching branch '{branch}' in '{repo_variant}'")
+            return repo_variant
+        print(f"  ℹ️  Branch '{branch}' not found in '{repo_variant}'")
+    return None
+
+
 def process_always_clone_repos(always_clone_repos: list, target_branch: str, token: Optional[str], repos_to_clone: list) -> None:
     """Process always-clone repos and add them to repos_to_clone list."""
     print(f"\nProcessing {len(always_clone_repos)} always-clone repo(s):")
@@ -359,40 +379,33 @@ def process_always_clone_repos(always_clone_repos: list, target_branch: str, tok
             print(f"  ⏭️  Skipping {primary_repo} - already in list from explicit requirement")
             continue
 
-        # Try to find a variant with the matching branch
-        matching_repo = None
-        for repo_variant in repo_variants:
-            print(f"  Checking for branch '{target_branch}' in '{repo_variant}'...")
-            if branch_exists(repo_variant, target_branch, token):
-                print(f"  ✅ Found matching branch '{target_branch}' in '{repo_variant}'")
-                matching_repo = repo_variant
-                break
-            else:
-                print(f"  ℹ️  Branch '{target_branch}' not found in '{repo_variant}'")
+        selected_branch = target_branch
+        matching_repo = _find_repo_with_branch(repo_variants, target_branch, token)
 
-        if matching_repo:
-            print(f"  + Adding {matching_repo}")
-            repos_to_clone.append(
-                {
-                    'target_dir': target_dir,
-                    'branch': target_branch,
-                    'clone_url': build_clone_url(matching_repo, token),
-                    'repo': matching_repo,
-                }
-            )
-        else:
-            # Fall back to devel if the target branch doesn't exist in any variant
-            fallback_branch = "devel"
-            fallback_repo = primary_repo
-            print(f"  ⚠️  Branch '{target_branch}' not found in any variant, falling back to '{fallback_branch}' from '{fallback_repo}'")
-            repos_to_clone.append(
-                {
-                    'target_dir': target_dir,
-                    'branch': fallback_branch,
-                    'clone_url': build_clone_url(fallback_repo, token),
-                    'repo': fallback_repo,
-                }
-            )
+        if not matching_repo:
+            # Prefer stable-x.y when the base starts with stable-x.y-...
+            stable_branch = stable_prefix_branch(target_branch)
+            if stable_branch:
+                print(f"  ⚠️  Branch '{target_branch}' not found in any variant, trying '{stable_branch}'")
+                matching_repo = _find_repo_with_branch(repo_variants, stable_branch, token)
+                if matching_repo:
+                    selected_branch = stable_branch
+
+        if not matching_repo:
+            # Final fallback: devel
+            selected_branch = "devel"
+            matching_repo = primary_repo
+            print(f"  ⚠️  Branch '{target_branch}' not found in any variant, falling back to '{selected_branch}' from '{matching_repo}'")
+
+        print(f"  + Adding {matching_repo} @ {selected_branch}")
+        repos_to_clone.append(
+            {
+                'target_dir': target_dir,
+                'branch': selected_branch,
+                'clone_url': build_clone_url(matching_repo, token),
+                'repo': matching_repo,
+            }
+        )
 
 
 def validate_no_duplicate_directories(repos_to_clone: list) -> dict:
